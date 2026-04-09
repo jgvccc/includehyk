@@ -485,17 +485,17 @@
             <div class="toolbar">
                 <div>
                     <h2>开始转换</h2>
-                    <p>支持快捷键：Ctrl/Cmd + Enter 快速加密，Ctrl/Cmd + Shift + Enter 快速解密。</p>
+                    <p>密文会始终落在刘哥之歌的固定 32 字里，Ctrl/Cmd + Enter 快速加密，Ctrl/Cmd + Shift + Enter 快速解密。</p>
                 </div>
             </div>
 
             <div class="panel key-panel">
                 <div class="panel-header">
                     <label for="keyBox">加密密钥</label>
-                    <span id="keyMeta">32 / 32 字符</span>
+                    <span id="keyMeta">请输入任意非空密钥</span>
                 </div>
-                <input id="keyBox" class="key-input" type="text" placeholder="请输入 32 个互不重复的字符作为密钥。" autocomplete="off" spellcheck="false">
-                <p class="key-note">密钥会保存在当前浏览器中，加密和解密都将使用这组 32 个不重复字符。</p>
+                <input id="keyBox" class="key-input" type="text" placeholder="请输入任意长度密钥，用于生成固定 32 字映射。" autocomplete="off" spellcheck="false">
+                <p class="key-note">密文始终只会使用刘哥之歌里的 32 个字；密钥只负责改变明文到这 32 个字的映射关系。</p>
             </div>
 
             <div class="editor-grid">
@@ -543,10 +543,12 @@
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
     <script>
-        const defaultCipherKey = "这就是我们的刘哥汉堡炸鸡配可乐放学时间消狂拽酷炫小让对手蒙圈拜服";
-        const KEY_LENGTH = 32;
+        const fixedCipherAlphabet = Array.from("这就是我们的刘哥汉堡炸鸡配可乐放学时间消狂拽酷炫小让对手蒙圈拜服");
+        const fixedCipherCharacterSet = new Set(fixedCipherAlphabet);
+        const defaultMappingKey = "刘哥之歌-初版映射";
+        const KEY_LENGTH = fixedCipherAlphabet.length;
         const draftStorageKey = "cipher-tool-draft";
-        const cipherKeyStorageKey = "cipher-tool-key";
+        const mappingKeyStorageKey = "cipher-tool-mapping-key-v2";
         const PARTICLE_COMPACT_BREAKPOINT = 900;
         const MOBILE_PARTICLE_COUNT = 28;
         const DESKTOP_PARTICLE_COUNT = 48;
@@ -583,14 +585,14 @@
         }
 
         function updateStats() {
-            const cipherKey = keyBox.value;
-            const currentKeyLength = Array.from(cipherKey).length;
+            const mappingKey = keyBox.value;
+            const currentKeyLength = Array.from(mappingKey).length;
 
-            if (isValidCipherKey(cipherKey)) {
-                keyMeta.textContent = currentKeyLength + " / " + KEY_LENGTH + " 字符 · 密钥可用";
+            if (isValidMappingKey(mappingKey)) {
+                keyMeta.textContent = currentKeyLength + " 字符 · 已生成固定 " + KEY_LENGTH + " 字映射";
                 keyBox.removeAttribute("aria-invalid");
             } else {
-                keyMeta.textContent = currentKeyLength + " / " + KEY_LENGTH + " 字符 · 需要 " + KEY_LENGTH + " 个不重复字符";
+                keyMeta.textContent = currentKeyLength + " 字符 · 请输入任意非空密钥";
                 keyBox.setAttribute("aria-invalid", "true");
             }
 
@@ -600,13 +602,8 @@
         }
 
         function isEncryptedText(text) {
-            const cipherKey = getCipherKey();
-            if (!cipherKey) {
-                return false;
-            }
-
             return text && Array.from(text).every(function(character) {
-                return cipherKey.indexOf(character) !== -1;
+                return fixedCipherCharacterSet.has(character);
             });
         }
 
@@ -617,23 +614,76 @@
             return text.length * (isEncryptedText(text) ? 5 : 16);
         }
 
-        function isValidCipherKey(cipherKey) {
-            const characters = Array.from(cipherKey);
-            return characters.length === KEY_LENGTH && new Set(characters).size === characters.length;
+        function isValidMappingKey(mappingKey) {
+            return Boolean(mappingKey && mappingKey.trim());
         }
 
-        function getCipherKey() {
-            return isValidCipherKey(keyBox.value) ? keyBox.value : null;
+        function createSeedGenerator(value) {
+            let hash = 1779033703 ^ value.length;
+
+            for (let i = 0; i < value.length; i++) {
+                hash = Math.imul(hash ^ value.charCodeAt(i), 3432918353);
+                hash = (hash << 13) | (hash >>> 19);
+            }
+
+            return function() {
+                hash = Math.imul(hash ^ (hash >>> 16), 2246822507);
+                hash = Math.imul(hash ^ (hash >>> 13), 3266489909);
+                return (hash ^= hash >>> 16) >>> 0;
+            };
         }
 
-        function getCipherKeyOrShowError() {
-            const cipherKey = getCipherKey();
-            if (!cipherKey) {
-                showToast("请先填写 " + KEY_LENGTH + " 个互不重复的密钥字符。", "error");
+        function createRandom(seed) {
+            return function() {
+                seed += 0x6D2B79F5;
+                let next = seed;
+                next = Math.imul(next ^ (next >>> 15), next | 1);
+                next ^= next + Math.imul(next ^ (next >>> 7), next | 61);
+                return ((next ^ (next >>> 14)) >>> 0) / 4294967296;
+            };
+        }
+
+        function buildCipherTables(mappingKey) {
+            const seedGenerator = createSeedGenerator(mappingKey);
+            const random = createRandom(seedGenerator());
+            const permutation = fixedCipherAlphabet.map(function(_character, index) {
+                return index;
+            });
+
+            for (let i = permutation.length - 1; i > 0; i--) {
+                const swapIndex = Math.floor(random() * (i + 1));
+                const currentIndex = permutation[i];
+                permutation[i] = permutation[swapIndex];
+                permutation[swapIndex] = currentIndex;
+            }
+
+            const encodeTable = permutation.map(function(index) {
+                return fixedCipherAlphabet[index];
+            });
+            const decodeTable = Object.create(null);
+
+            encodeTable.forEach(function(character, index) {
+                decodeTable[character] = index;
+            });
+
+            return {
+                encodeTable: encodeTable,
+                decodeTable: decodeTable
+            };
+        }
+
+        function getMappingKey() {
+            return isValidMappingKey(keyBox.value) ? keyBox.value : null;
+        }
+
+        function getMappingKeyOrShowError() {
+            const mappingKey = getMappingKey();
+            if (!mappingKey) {
+                showToast("请先输入任意非空密钥。", "error");
                 keyBox.focus();
                 return null;
             }
-            return cipherKey;
+            return mappingKey;
         }
 
         function saveDraft() {
@@ -641,8 +691,8 @@
             storageHint.textContent = inputBox.value ? "草稿已自动保存" : "草稿已清空";
         }
 
-        function saveCipherKey() {
-            localStorage.setItem(cipherKeyStorageKey, keyBox.value);
+        function saveMappingKey() {
+            localStorage.setItem(mappingKeyStorageKey, keyBox.value);
         }
 
         function restoreDraft() {
@@ -654,14 +704,14 @@
             updateStats();
         }
 
-        function restoreCipherKey() {
-            const storedCipherKey = localStorage.getItem(cipherKeyStorageKey);
-            if (storedCipherKey && isValidCipherKey(storedCipherKey)) {
-                keyBox.value = storedCipherKey;
+        function restoreMappingKey() {
+            const storedMappingKey = localStorage.getItem(mappingKeyStorageKey);
+            if (storedMappingKey && isValidMappingKey(storedMappingKey)) {
+                keyBox.value = storedMappingKey;
             } else {
-                keyBox.value = defaultCipherKey;
-                if (storedCipherKey) {
-                    localStorage.removeItem(cipherKeyStorageKey);
+                keyBox.value = defaultMappingKey;
+                if (storedMappingKey) {
+                    localStorage.removeItem(mappingKeyStorageKey);
                 }
             }
             updateStats();
@@ -673,10 +723,11 @@
                 showToast("请先输入要加密的内容。", "error");
                 return;
             }
-            const cipherKey = getCipherKeyOrShowError();
-            if (!cipherKey) {
+            const mappingKey = getMappingKeyOrShowError();
+            if (!mappingKey) {
                 return;
             }
+            const cipherTables = buildCipherTables(mappingKey);
 
             let binaryString = "";
             for (let i = 0; i < inputText.length; i++) {
@@ -692,10 +743,10 @@
             for (let i = 0; i < binaryString.length; i += 5) {
                 const binaryGroup = binaryString.substring(i, i + 5);
                 const decimalValue = parseInt(binaryGroup, 2);
-                if (decimalValue >= 0 && decimalValue < cipherKey.length) {
-                    resultText += cipherKey[decimalValue];
+                if (decimalValue >= 0 && decimalValue < cipherTables.encodeTable.length) {
+                    resultText += cipherTables.encodeTable[decimalValue];
                 } else {
-                    showToast("加密失败，生成的二进制数超出密钥字符范围。", "error");
+                    showToast("加密失败，生成的映射结果超出固定字库范围。", "error");
                     return;
                 }
             }
@@ -712,18 +763,23 @@
                 showToast("请先输入要解密的密文。", "error");
                 return;
             }
-            const cipherKey = getCipherKeyOrShowError();
-            if (!cipherKey) {
+            const mappingKey = getMappingKeyOrShowError();
+            if (!mappingKey) {
                 return;
             }
+            const cipherTables = buildCipherTables(mappingKey);
 
             let binaryString = "";
-            for (let i = 0; i < encryptedText.length; i++) {
-                const charIndex = cipherKey.indexOf(encryptedText[i]);
-                if (charIndex === -1) {
-                    showToast("解密失败，输入内容包含当前密钥外的字符。", "error");
+            const encryptedCharacters = Array.from(encryptedText);
+
+            for (let i = 0; i < encryptedCharacters.length; i++) {
+                const encryptedCharacter = encryptedCharacters[i];
+                if (!fixedCipherCharacterSet.has(encryptedCharacter)) {
+                    showToast("解密失败，密文只能包含刘哥之歌里的固定 32 个字。", "error");
                     return;
                 }
+
+                const charIndex = cipherTables.decodeTable[encryptedCharacter];
                 binaryString += charIndex.toString(2).padStart(5, "0");
             }
 
@@ -810,7 +866,7 @@
         });
 
         keyBox.addEventListener("input", function() {
-            saveCipherKey();
+            saveMappingKey();
             updateStats();
         });
 
@@ -932,7 +988,7 @@
             });
         }
 
-        restoreCipherKey();
+        restoreMappingKey();
         restoreDraft();
         setupCursorGlow();
         setupParticles();
